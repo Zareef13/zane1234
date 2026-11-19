@@ -46,5 +46,15 @@ def generate_launch_description():
                 executable="perception_controller.py",
                 package="autonomy_repo",
             ),
+            #compressing the detector feed on turtlebot 
+            Node(
+                package="image_transport",
+                executable="republish",
+                arguments=["compressed", "raw"],
+                remappings=[
+                    ("in/compressed", "/detector_image/compressed"),
+                    ("out", "/detector_image_decompressed"),
+                ],
+                )
         ]
     )
