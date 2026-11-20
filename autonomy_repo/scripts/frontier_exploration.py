@@ -54,6 +54,70 @@ class FrontierExploration(Node):
             self.publish_frontier_goal,
         )
 
+
+        self.declare_parameter("active", True)
+        self.stop_start_time = None
+        self.cooldown_until = None
+
+        self.pause_pub = self.create_publisher(
+            Bool, "/pause_navigation", 10
+        )
+
+        self.detector_sub = self.create_subscription(
+            Bool,
+            "/detector_bool",
+            self.detector_callback,
+            10,
+        )
+
+        self.stop_timer = self.create_timer(
+            0.1, self.check_stop
+        )
+
+    @property
+    def active(self) -> bool:
+        return self.get_parameter("active").value
+
+    def detector_callback(self, msg):
+        current_time = self.get_clock().now().nanoseconds / 1e9
+
+        if not msg.data:
+            return
+
+        if not self.active:
+            return
+
+        if self.cooldown_until is not None:
+            if current_time < self.cooldown_until:
+                return
+
+        self.set_parameters([
+            rclpy.Parameter("active", value=False)
+        ])
+
+        self.stop_start_time = current_time
+        self.pause_pub.publish(Bool(data=True))
+        self.get_logger().info("Stop sign detected: stopping for 5 seconds")
+
+    def check_stop(self):
+        if self.active:
+            return
+
+        current_time = self.get_clock().now().nanoseconds / 1e9
+
+        if self.stop_start_time is None:
+            return
+
+        if current_time - self.stop_start_time >= 5:
+            self.set_parameters([
+                rclpy.Parameter("active", value=True)
+            ])
+
+            self.stop_start_time = None
+            self.cooldown_until = current_time + 3.0
+            self.pause_pub.publish(Bool(data=False))
+            self.get_logger().info("Resuming exploration")
+
     def state_callback(self, msg):
         self.state = msg
 
@@ -120,6 +184,8 @@ class FrontierExploration(Node):
         return occupancy.grid2state(grid_xy)
 
     def publish_frontier_goal(self):
+        if not self.active:
+            return
         if self.state is None or self.occupancy is None:
             return
 
@@ -132,7 +198,7 @@ class FrontierExploration(Node):
         frontier_states = self.explore()
 
         if len(frontier_states) == 0:
-            self.get_logger().info("No frontier candidates found")
+            self.get_logger().info("Finished Exploring")
             return
 
         robot_xy = np.array([self.state.x, self.state.y])

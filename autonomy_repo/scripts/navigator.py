@@ -9,6 +9,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from asl_tb3_lib.grids import snap_to_grid, StochOccupancyGrid2D
 from scipy.interpolate import splrep
 import typing as T
+from std_msgs.msg import Bool
 
 
 
@@ -213,8 +214,43 @@ class Navigator(BaseNavigator):
         self.V_prev = 0.0
         self.om_prev = 0.0
         self.t_prev = 0.0
-        
+        self.paused = False
+        self.resume_goal = None
 
+        self.pause_sub = self.create_subscription(
+            Bool,
+            "/pause_navigation",
+            self.pause_callback,
+            10,
+        )
+        
+    def pause_callback(self, msg):
+        if msg.data:
+            if not self.paused:
+                self.resume_goal = (
+                    self.goal if self.is_planned else None
+                )
+                self.paused = True
+
+        elif self.paused:
+            self.paused = False
+
+            if self.resume_goal is not None:
+                goal = self.resume_goal
+                self.resume_goal = None
+                self.replan(goal)
+
+    def can_compute_control(self):
+        if self.paused:
+            return True
+
+        return super().can_compute_control()
+
+    def compute_control(self):
+        if self.paused:
+            return TurtleBotControl()
+
+        return super().compute_control()
 
     def compute_heading_control(self, state: TurtleBotState, goal: TurtleBotState) ->  TurtleBotControl:
         wrappedError = wrap_angle( goal.theta - state.theta)
