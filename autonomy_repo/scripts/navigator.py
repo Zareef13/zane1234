@@ -8,11 +8,38 @@ from scipy.interpolate import splev
 from nav_msgs.msg import OccupancyGrid, Path
 from asl_tb3_lib.grids import snap_to_grid, StochOccupancyGrid2D
 from scipy.interpolate import splrep
+from scipy.ndimage import convolve
 import typing as T
 from std_msgs.msg import Bool
 
 
+def remove_speckle(probs: np.ndarray) -> np.ndarray:
+    """Clear occupied cells that have no occupied 8-neighbour.
 
+    The real robot's map has hundreds of isolated single-cell hits (lidar noise)
+    scattered through free space. With the 9x9 clearance window, each one blocks
+    a 0.45 m square, which sealed the robot inside a small pocket so every A*
+    call failed. Real walls are multi-cell lines and are kept.
+    """
+    occupied = probs >= 50
+    neighbours = convolve(occupied.astype(int), np.ones((3, 3), dtype=int), mode="constant") - occupied
+    cleaned = probs.copy()
+    cleaned[occupied & (neighbours == 0)] = 0
+    return cleaned
+
+
+def with_window(occupancy: StochOccupancyGrid2D, window_size: int) -> StochOccupancyGrid2D:
+    """Same map, different clearance window."""
+    if occupancy.window_size == window_size:
+        return occupancy
+    return StochOccupancyGrid2D(
+        resolution=occupancy.resolution,
+        size_xy=occupancy.size_xy,
+        origin_xy=occupancy.origin_xy,
+        window_size=window_size,
+        probs=occupancy.probs,
+        thresh=occupancy.thresh,
+    )
 
 
 class AStar(object):
@@ -59,7 +86,6 @@ class AStar(object):
             return True
         else:
             return False
-
             
         
         ########## Code ends here ##########
@@ -199,8 +225,15 @@ class AStar(object):
 
 
 class Navigator(BaseNavigator):
+    # Clearance windows in map cells (0.05 m each). 9 (~0.2 m clearance) is the
+    # library default; 7 (~0.15 m) is a fallback for tight spots, still above the
+    # TurtleBot3's ~0.105 m radius.
+    STRICT_WINDOW = 9
+    RELAXED_WINDOW = 7
+
     def __init__(self) -> None:
         super().__init__("Navigator")
+        self.plan_window = self.STRICT_WINDOW
         # heading controller 
         self.kp = 2.0 
         self.V_PREV_THRES = 0.0001
@@ -240,6 +273,25 @@ class Navigator(BaseNavigator):
                 self.resume_goal = None
                 self.replan(goal)
 
+    def map_callback(self, msg: OccupancyGrid) -> None:
+        """Same as BaseNavigator.map_callback, but with speckle removed and the
+        collision re-check done at the clearance the current plan was made with."""
+        size_xy = np.array([msg.info.width, msg.info.height])
+        probs = np.asarray(msg.data).reshape(size_xy[1], size_xy[0])
+        self.occupancy = StochOccupancyGrid2D(
+            resolution=msg.info.resolution,
+            size_xy=size_xy,
+            origin_xy=np.array([msg.info.origin.position.x, msg.info.origin.position.y]),
+            window_size=self.STRICT_WINDOW,
+            probs=remove_speckle(probs),
+        )
+
+        if self.is_planned:
+            grid = with_window(self.occupancy, self.plan_window)
+            if not all(grid.is_free(s) for s in self.plan.path[1:]):
+                self.is_planned = False
+                self.replan(self.goal)
+
     def can_compute_control(self):
         if self.paused:
             return True
@@ -251,7 +303,7 @@ class Navigator(BaseNavigator):
             return TurtleBotControl()
 
         return super().compute_control()
-
+        
     def compute_heading_control(self, state: TurtleBotState, goal: TurtleBotState) ->  TurtleBotControl:
         wrappedError = wrap_angle( goal.theta - state.theta)
         omega = self.kp * wrappedError
@@ -332,16 +384,33 @@ class Navigator(BaseNavigator):
         statespace_lo = occupancy.origin_xy
         statespace_hi = occupancy.origin_xy + occupancy.size_xy * occupancy.resolution
 
-        astar = AStar(
-            statespace_lo,
-            statespace_hi,
-            x_init,
-            x_goal,
-            occupancy,
-            resolution)
+        # Try normal clearance first; only squeeze closer to walls if that fails.
+        for window in (self.STRICT_WINDOW, self.RELAXED_WINDOW):
+            grid = with_window(occupancy, window)
+            astar = AStar(
+                statespace_lo,
+                statespace_hi,
+                x_init,
+                x_goal,
+                grid,
+                resolution)
 
-        if not astar.solve() or len(astar.path) < 4:
+            solved = astar.solve()
+            if solved and len(astar.path) >= 4:
+                if window != self.STRICT_WINDOW:
+                    self.get_logger().warn(f"A* succeeded only with relaxed clearance window {window}")
+                self.plan_window = window
+                break
+            if solved:
+                # Goal is too close for a spline fit; relaxing clearance won't change that.
+                return None
+            self.get_logger().warn(
+                f"A* failed (window {window}): start free={astar.is_free(astar.x_init)}, "
+                f"goal free={astar.is_free(astar.x_goal)}, expanded {len(astar.closed_set)} nodes"
+            )
+        else:
             return None
+
         self.V_prev = 0.0
         self.om_prev = 0.0
         self.t_prev = 0.0
@@ -368,11 +437,6 @@ class Navigator(BaseNavigator):
             path_y_spline=path_y_spline,
             duration=ts[-1],
         )
-
-        
-
-        
-
 
 if __name__ == "__main__":
     rclpy.init()                # initialize ROS2 Client library

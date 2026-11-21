@@ -55,5 +55,26 @@ def generate_launch_description():
                 ],
                 output="screen",
             ),
+
+            # decompress the robot's annotated detector feed for the "Stop Sign Detector" panel in rviz
+            Node(
+                package="image_transport",
+                executable="republish",
+                arguments=["compressed", "raw"],
+                remappings=[
+                    ("in/compressed", "/detector_image/compressed"),
+                    ("out", "/detector_image_decompressed"),
+                ],
+            ),
+
+            # pauses the navigator for >= 5 s at each stop sign (/detector_bool -> /pause_navigation)
+            Node(
+                executable="stop_sign_monitor.py",
+                package="autonomy_repo",
+                parameters=[
+                    {"use_sim_time": use_sim_time},
+                ],
+                output="screen",
+            ),
         ]
     )

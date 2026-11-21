@@ -15,6 +15,7 @@ install(PROGRAMS
     scripts/navigator.py
     scripts/perception_controller.py
     scripts/frontier_exploration.py
+    scripts/stop_sign_monitor.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
